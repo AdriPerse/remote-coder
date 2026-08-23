@@ -182,3 +182,85 @@ class TestServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestOrigin(unittest.TestCase):
+    """Provenance is what makes a queued follow-up routable at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ArtifactStore(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_origin_round_trips(self):
+        self.store.write("demo", "<p>x</p>")
+        self.store.record_origin("demo", "thread-7", Path("C:/Projects/MusicLore"))
+        thread_id, workdir = self.store.origin("demo")
+        self.assertEqual(thread_id, "thread-7")
+        self.assertEqual(workdir, Path("C:/Projects/MusicLore"))
+
+    def test_unknown_slug_has_no_origin(self):
+        """Must be None, never a default -- guessing runs the wrong repo."""
+        self.assertIsNone(self.store.origin("never-written"))
+
+    def test_rewriting_updates_the_origin(self):
+        self.store.record_origin("demo", "old", Path("C:/old"))
+        self.store.record_origin("demo", "new", Path("C:/new"))
+        self.assertEqual(self.store.origin("demo"), ("new", Path("C:/new")))
+
+    def test_origin_rejects_a_bad_slug(self):
+        with self.assertRaises(BadSlug):
+            self.store.record_origin("../evil", "t", Path("C:/x"))
+
+
+class TestWatchRouting(unittest.TestCase):
+    """The consumer must refuse to guess rather than run somewhere wrong."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ArtifactStore(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _request(self, slug="demo", prompt="make it blue"):
+        self.store.write(slug, "<p>x</p>")
+        request_id = self.store.enqueue(slug, prompt)
+        return self.store.take(request_id)
+
+    def test_no_origin_means_the_agent_is_never_built(self):
+        import watch
+
+        built = []
+        original = watch.build_agent
+        watch.build_agent = lambda *a, **k: built.append(1)
+        try:
+            watch.handle(None, self.store, self._request(), "http://x", True)
+        finally:
+            watch.build_agent = original
+        self.assertEqual(built, [])   # refused, not guessed
+
+    def test_vanished_repo_means_the_agent_is_never_built(self):
+        import watch
+
+        self.store.record_origin("demo", "t1", Path(self.tmp.name) / "gone")
+        built = []
+        original = watch.build_agent
+        watch.build_agent = lambda *a, **k: built.append(1)
+        try:
+            watch.handle(None, self.store, self._request(), "http://x", True)
+        finally:
+            watch.build_agent = original
+        self.assertEqual(built, [])
+
+    def test_a_claimed_request_is_not_replayed(self):
+        """A crash must not become a token-burning retry loop."""
+        self.store.write("demo", "<p>x</p>")
+        request_id = self.store.enqueue("demo", "boom")
+        self.assertIsNotNone(self.store.take(request_id))
+        self.assertEqual(self.store.pending(), [])
+        self.assertIsNone(self.store.take(request_id))

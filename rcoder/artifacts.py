@@ -29,6 +29,12 @@ from pathlib import Path
 SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 QUEUE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS artifact_origin (
+    slug      TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    workdir   TEXT NOT NULL,
+    updated   REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS artifact_requests (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     slug     TEXT NOT NULL,
@@ -108,6 +114,32 @@ class ArtifactStore:
             if artifact is not None:
                 found.append(artifact)
         return sorted(found, key=lambda a: a.modified, reverse=True)
+
+    # -- provenance --------------------------------------------------------
+    def record_origin(self, slug: str, thread_id: str, workdir: Path | str) -> None:
+        """Remember which session and repo produced this artifact.
+
+        Without this a queued follow-up is unroutable: "make the boxes
+        bigger" means nothing without the conversation that drew them, and
+        guessing a working directory would run the agent against the wrong
+        repository.
+        """
+        check_slug(slug)
+        self.conn.execute(
+            "INSERT INTO artifact_origin (slug, thread_id, workdir, updated) "
+            "VALUES (?,?,?,?) ON CONFLICT(slug) DO UPDATE SET "
+            "thread_id=excluded.thread_id, workdir=excluded.workdir, "
+            "updated=excluded.updated",
+            (slug, thread_id, str(workdir), time.time()),
+        )
+        self.conn.commit()
+
+    def origin(self, slug: str) -> tuple[str, Path] | None:
+        """(thread_id, workdir) for a slug, or None if it was never recorded."""
+        row = self.conn.execute(
+            "SELECT thread_id, workdir FROM artifact_origin WHERE slug=?", (slug,)
+        ).fetchone()
+        return (row["thread_id"], Path(row["workdir"])) if row else None
 
     # -- follow-up requests from the phone ---------------------------------
     def enqueue(self, slug: str, prompt: str) -> int:

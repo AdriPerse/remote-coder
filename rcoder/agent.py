@@ -100,7 +100,9 @@ def _scrubbed_env(settings: Settings) -> dict[str, str]:
     return env
 
 
-def make_artifact_tool(store: ArtifactStore, base_url: str):
+def make_artifact_tool(
+    store: ArtifactStore, base_url: str, thread_id: str, workdir: Path
+):
     """A `write_artifact` tool bound to one store.
 
     Built as a closure rather than a module-level function because the tool
@@ -131,6 +133,9 @@ def make_artifact_tool(store: ArtifactStore, base_url: str):
             artifact = store.write(slug, html)
         except BadSlug as exc:
             return f"Rejected: {exc}"
+        # Provenance, so a follow-up typed on the phone can be routed back to
+        # this session and this repository.
+        store.record_origin(artifact.slug, thread_id, workdir)
         logger.info("Wrote artifact %s (%d bytes)", artifact.slug, len(html))
         return f"Published: {base_url}/a/{artifact.slug}"
 
@@ -166,6 +171,7 @@ def build_agent(
     checkpointer: SqliteSaver | None = None,
     artifact_store: ArtifactStore | None = None,
     artifact_base_url: str = "http://127.0.0.1:8001",
+    session_id: str = "default",
 ):
     """Compile an agent rooted at `workdir`.
 
@@ -191,7 +197,11 @@ def build_agent(
     # behind an approval gate. Gating it would mean a tap for every redraw.
     tools = []
     if artifact_store is not None:
-        tools.append(make_artifact_tool(artifact_store, artifact_base_url.rstrip("/")))
+        tools.append(
+            make_artifact_tool(
+                artifact_store, artifact_base_url.rstrip("/"), session_id, workdir
+            )
+        )
 
     return create_deep_agent(
         model=build_model(settings),

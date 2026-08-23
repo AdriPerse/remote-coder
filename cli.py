@@ -90,6 +90,7 @@ def main() -> int:
         checkpointer=open_checkpointer(settings),
         artifact_store=store,
         artifact_base_url=args.artifact_url,
+        session_id=args.thread,
     )
     config = {"configurable": {"thread_id": args.thread}, "recursion_limit": 100}
 

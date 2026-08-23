@@ -60,7 +60,18 @@ a change into the box at the bottom, and the page reloads itself when the
 agent rewrites the file.
 
     python artifact_server.py --root ./artifacts --port 8001 --host 0.0.0.0
+    python watch.py --artifacts ./artifacts      # runs the follow-ups
     python cli.py <repo> "<task>" --artifacts ./artifacts
+
+The loop: the page's prompt box enqueues a request, `watch.py` claims it and
+runs the agent **in the session and repository that produced the artifact**
+(recorded when it was written -- without that, a follow-up is unroutable and
+guessing a directory would edit the wrong repo). The agent rewrites the file
+and the server pushes a reload.
+
+A claimed request is never retried. `take()` marks it before the agent runs,
+so a request that crashes the agent is dropped rather than replayed -- a
+silent retry loop burning tokens unattended is the worse failure.
 
 Run it on its own port, which makes it its own **origin**. Three layers of
 isolation, and each one is load-bearing:
