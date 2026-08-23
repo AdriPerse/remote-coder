@@ -101,8 +101,15 @@ Cleaning a hostile path is how traversal bugs get written.
 - `temperature` must be exactly **1** on kimi-k3 and kimi-k2.7-code. LangChain
   defaults to 0.7, so the naive wiring fails closed.
 - The shell backend does not inherit the environment, so `git` and `python` do
-  not resolve. We pass an explicit environment with the secrets **scrubbed** --
-  otherwise the agent's first shell command can read its own API key.
+  not resolve. We pass an explicit environment with the secrets scrubbed.
+  **This is a speed bump, not containment** -- measured 2026-08-23: the env
+  var is genuinely hidden (`ENV: NOT VISIBLE`), and then the agent read the
+  same key out of the registry with `reg query HKCU\Environment`. An agent
+  with unrestricted shell can read anything the user can read. Scrubbing
+  removes the casual path and limits what a careless prompt echoes; it does
+  not stop a determined one. Real containment needs OS-level isolation -- a
+  separate low-privilege user account, a container, or a VM -- which this does
+  not have. Do not treat the agent as trusted with secrets on this host.
 - File tools and the shell disagree about paths (`virtual_mode=True` maps `/`
   to the repo root while the shell prints host paths). Kept anyway for the
   traversal guardrail; the prompt states the contract explicitly.
