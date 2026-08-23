@@ -1,0 +1,8 @@
+# Pinned deliberately: deepagents ships breaking changes in MINOR releases
+# (0.7 silently made task planning opt-in), and its checkpoint format is a
+# one-way door -- once threads persist under DeltaChannel, older versions
+# cannot read them. Upgrade on purpose, never incidentally.
+deepagents==0.7.8
+langchain-openai==1.6.0
+python-telegram-bot==22.8
+langgraph-checkpoint-sqlite==3.1.1
