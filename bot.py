@@ -29,6 +29,7 @@ from rcoder.agent import build_agent, open_async_checkpointer
 from rcoder.config import ConfigurationError, load_settings
 from rcoder.pricing import estimate_cost
 from rcoder.progress import Progress
+from rcoder.repos import discover
 from rcoder.sessions import SessionStore
 
 logger = logging.getLogger("rcoder.bot")
@@ -63,6 +64,9 @@ class Bot:
         self.busy: dict[int, bool] = {}
         self.cancel: dict[int, bool] = {}
         self.pending: dict[int, dict] = {}
+        # chat -> the repo list currently on offer. Lost on restart,
+        # which is handled rather than ignored: a stale tap says so.
+        self.repo_choices: dict[int, list[Path]] = {}
 
     # -- guards -----------------------------------------------------------
     def authorised(self, update: Update) -> bool:
@@ -86,6 +90,35 @@ class Bot:
             checkpointer=self.checkpointer,
         )
 
+    # -- repo picker ------------------------------------------------------
+    async def offer_repos(self, chat_id: int, header: str) -> None:
+        """Send a tap-to-pick list of repositories.
+
+        Typing a Windows path on a phone is the friction this removes.
+        """
+        known = [s.workdir for s in self.store.list(chat_id, limit=20)]
+        choices = discover(extra=known)
+        if not choices:
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text="I could not find any git repositories to offer. "
+                     "Send /repo <full path> instead.",
+            )
+            return
+        self.repo_choices[chat_id] = choices
+        rows = [
+            [InlineKeyboardButton(path.name, callback_data="repo:{}".format(i))]
+            for i, path in enumerate(choices)
+        ]
+        await self.app.bot.send_message(
+            chat_id=chat_id, text=header,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def use_repo(self, chat_id: int, path: Path) -> str:
+        session = self.store.create(chat_id, path)
+        return "Working in {}\nSession {}".format(path, session.thread_id)
+
     # -- commands ---------------------------------------------------------
     async def cmd_start(self, update: Update, _ctx) -> None:
         if not self.authorised(update):
@@ -107,12 +140,15 @@ class Bot:
     async def cmd_repo(self, update: Update, ctx) -> None:
         if not self.authorised(update):
             return
+        chat_id = update.effective_chat.id
         raw = " ".join(ctx.args).strip()
         if not raw:
-            session = self.store.current(update.effective_chat.id)
-            await update.message.reply_text(
-                "Current repo: {}".format(session.workdir) if session else "No repo set."
+            session = self.store.current(chat_id)
+            header = (
+                "Current repo: {}\n\nPick another:".format(session.workdir)
+                if session else "Pick a repository:"
             )
+            await self.offer_repos(chat_id, header)
             return
         path = Path(raw)
         # Never create the directory: a typo would mint a junk folder and the
@@ -264,8 +300,15 @@ class Bot:
             return
         session = self.store.current(chat_id)
         if session is None:
-            await update.message.reply_text(
-                "No repo set. Use /repo <full path> first."
+            # A refusal that hands back a form is a dead end. Offer the list,
+            # and keep what they asked so it runs once a repo is chosen.
+            self.queued_task = getattr(self, "queued_task", {})
+            self.queued_task[chat_id] = text
+            await self.offer_repos(
+                chat_id,
+                "I need a repository first. Pick one and I will then run:\n\n{}".format(
+                    short(text, 200)
+                ),
             )
             return
         if not session.title:
@@ -394,6 +437,9 @@ class Bot:
         chat_id = query.message.chat_id
         if chat_id != self.settings.allowed_chat_id:
             return
+        if (query.data or "").startswith("repo:"):
+            await self.on_repo_pick(query, chat_id)
+            return
         pending = self.pending.pop(chat_id, None)
         if pending is None:
             await query.edit_message_text("That approval has expired.")
@@ -410,6 +456,29 @@ class Bot:
         )
         decisions = [dict(decision) for _ in range(pending["n"])]
         await self.run(chat_id, session, Command(resume={"decisions": decisions}))
+
+    async def on_repo_pick(self, query, chat_id: int) -> None:
+        choices = self.repo_choices.get(chat_id) or []
+        try:
+            index = int((query.data or "repo:").split(":", 1)[1])
+            path = choices[index]
+        except (ValueError, IndexError):
+            # The list is in memory, so a restart invalidates old buttons.
+            await query.edit_message_text(
+                "That list is out of date - send /repo again."
+            )
+            return
+        await query.edit_message_text(await self.use_repo(chat_id, path))
+        # Run whatever they asked before they had a repo.
+        queued = getattr(self, "queued_task", {}).pop(chat_id, None)
+        if queued:
+            session = self.store.current(chat_id)
+            if session is not None:
+                self.store.touch(session.thread_id, title=queued)
+                await self.run(
+                    chat_id, session,
+                    {"messages": [{"role": "user", "content": queued}]},
+                )
 
     async def send_long(self, chat_id: int, text: str) -> None:
         for i in range(0, len(text), 4000):

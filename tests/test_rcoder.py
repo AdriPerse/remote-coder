@@ -229,6 +229,8 @@ class FakeUpdate:
     def __init__(self, chat_id, text=""):
         self.effective_chat = FakeChat(chat_id)
         self.message = FakeUserMessage(text)
+        # Telegram exposes both; authorised() logs via effective_message.
+        self.effective_message = self.message
 
 
 class FakeCtx:
@@ -237,21 +239,18 @@ class FakeCtx:
 
 
 def make_bot(tmpdir):
-    """A Bot with real logic but no Telegram and no checkpointer."""
+    """A real Bot, with Telegram and the checkpointer left unopened.
+
+    This calls the REAL __init__ on purpose. An earlier version hand-set the
+    attributes it thought Bot had, then drifted the moment a field was added
+    and every bot test errored at once. A helper that reimplements the thing
+    it is testing tests the helper.
+    """
     import bot as bot_mod
 
     settings = make_settings()
     object.__setattr__(settings, "state_dir", Path(tmpdir))
-    instance = bot_mod.Bot.__new__(bot_mod.Bot)
-    instance.settings = settings
-    instance.store = SessionStore(Path(tmpdir) / "s.db")
-    instance.checkpointer = None
-    instance._checkpointer_cm = None
-    instance.app = None
-    instance.busy = {}
-    instance.cancel = {}
-    instance.pending = {}
-    return instance
+    return bot_mod.Bot(settings)
 
 
 class TestBotGuards(unittest.IsolatedAsyncioTestCase):
@@ -269,10 +268,29 @@ class TestBotGuards(unittest.IsolatedAsyncioTestCase):
         await self.bot.on_message(update, FakeCtx())
         self.assertEqual(update.message.replies, [])
 
-    async def test_owner_without_a_repo_is_told_so(self):
-        update = FakeUpdate(chat_id=42, text="fix the tests")
-        await self.bot.on_message(update, FakeCtx())
-        self.assertIn("/repo", update.message.replies[0])
+    async def test_no_repo_offers_a_picker_and_keeps_the_task(self):
+        """A refusal that hands back a form is a dead end.
+
+        The old behaviour replied "use /repo <full path>" -- which, on a
+        phone, means typing a Windows path. Now it offers the list and
+        remembers what was asked so it runs once a repo is chosen.
+        """
+        sent = []
+
+        class FakeAppBot:
+            async def send_message(self, chat_id, text, reply_markup=None):
+                sent.append((text, reply_markup))
+
+        self.bot.app = type("A", (), {"bot": FakeAppBot()})()
+        self.bot.repo_choices[42] = []
+        with mock.patch("bot.discover", lambda extra=None: [Path(self.tmp.name)]):
+            update = FakeUpdate(chat_id=42, text="fix the tests")
+            await self.bot.on_message(update, FakeCtx())
+        self.assertTrue(sent, "should have offered a repo list")
+        text, markup = sent[0]
+        self.assertIn("fix the tests", text)      # the task is echoed back
+        self.assertIsNotNone(markup)              # with tappable buttons
+        self.assertEqual(self.bot.queued_task[42], "fix the tests")
 
     async def test_repo_refuses_a_path_that_does_not_exist(self):
         """A typo must never mint a junk folder to work in."""
@@ -327,3 +345,106 @@ class TestBotGuards(unittest.IsolatedAsyncioTestCase):
         self.bot.run = None   # must never be called; would raise if it were
         await self.bot.on_callback(update, FakeCtx())
         self.assertIn("expired", query.edited)
+
+
+class TestRepoDiscovery(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        for name in ("alpha", "beta"):
+            (self.root / name / ".git").mkdir(parents=True)
+        (self.root / "not-a-repo").mkdir()
+        (self.root / "group" / "gamma" / ".git").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _discover(self, extra=None):
+        from rcoder import repos
+
+        with mock.patch.dict(os.environ, {"RC_REPO_ROOTS": str(self.root)}):
+            return repos.discover(extra=extra)
+
+    def test_finds_repos_one_and_two_levels_deep(self):
+        names = {p.name for p in self._discover()}
+        self.assertEqual(names, {"alpha", "beta", "gamma"})
+
+    def test_ignores_directories_without_git(self):
+        self.assertNotIn("not-a-repo", {p.name for p in self._discover()})
+
+    def test_extra_paths_are_included_and_not_duplicated(self):
+        extra = [self.root / "alpha"]
+        found = self._discover(extra=extra)
+        self.assertEqual(sum(1 for p in found if p.name == "alpha"), 1)
+
+    def test_extra_must_still_be_a_repo(self):
+        found = self._discover(extra=[self.root / "not-a-repo"])
+        self.assertNotIn("not-a-repo", {p.name for p in found})
+
+    def test_missing_root_is_survived(self):
+        from rcoder import repos
+
+        with mock.patch.dict(os.environ, {"RC_REPO_ROOTS": r"C:\nope\nowhere"}):
+            self.assertEqual(repos.discover(), [])
+
+    def test_list_is_capped(self):
+        from rcoder import repos
+
+        for i in range(20):
+            (self.root / "r{}".format(i) / ".git").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"RC_REPO_ROOTS": str(self.root)}):
+            self.assertLessEqual(len(repos.discover()), repos.MAX_CHOICES)
+
+
+class TestRepoPicker(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bot = make_bot(self.tmp.name)
+
+    def tearDown(self):
+        self.bot.store.close()
+        self.tmp.cleanup()
+
+    class FakeQuery:
+        def __init__(self, data):
+            self.data = data
+            self.message = type("M", (), {"chat_id": 42})()
+            self.edited = None
+
+        async def answer(self):
+            pass
+
+        async def edit_message_text(self, text):
+            self.edited = text
+
+    async def test_a_stale_button_says_so_instead_of_picking_wrongly(self):
+        """Choices live in memory; a restart must not silently pick repo 0."""
+        query = self.FakeQuery("repo:3")
+        await self.bot.on_repo_pick(query, 42)
+        self.assertIn("out of date", query.edited)
+        self.assertIsNone(self.bot.store.current(42))
+
+    async def test_out_of_range_index_is_refused(self):
+        self.bot.repo_choices[42] = [Path(self.tmp.name)]
+        query = self.FakeQuery("repo:99")
+        await self.bot.on_repo_pick(query, 42)
+        self.assertIn("out of date", query.edited)
+
+    async def test_picking_sets_the_session(self):
+        self.bot.repo_choices[42] = [Path(self.tmp.name)]
+        query = self.FakeQuery("repo:0")
+        await self.bot.on_repo_pick(query, 42)
+        current = self.bot.store.current(42)
+        self.assertIsNotNone(current)
+        self.assertIn("Working in", query.edited)
+
+    async def test_a_repo_pick_is_not_treated_as_an_approval(self):
+        """The two button kinds share one handler; they must not cross."""
+        self.bot.repo_choices[42] = [Path(self.tmp.name)]
+        self.bot.pending[42] = {"n": 1}
+        query = self.FakeQuery("repo:0")
+        update = type("U", (), {"callback_query": query})()
+        self.bot.settings = make_settings(allowed_chat_id=42)
+        await self.bot.on_callback(update, FakeCtx())
+        # The approval must still be waiting, untouched.
+        self.assertIn(42, self.bot.pending)
