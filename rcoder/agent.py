@@ -34,6 +34,7 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from rcoder.artifacts import ArtifactStore, BadSlug
 from rcoder.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,15 @@ outcome. Keep it short. No walls of code unless asked.
 success you have not verified.
 - If you are blocked or the request is ambiguous in a way that changes what \
 you would build, say so and ask -- do not guess and carry on.
+
+Showing your work:
+- When the answer is better SEEN than described -- a chart, a diagram, a
+table, a mock-up, a rendered document -- use `write_artifact` and give the
+user the link, instead of describing the picture in words. They are on a
+phone; a rendered page beats a paragraph about one.
+- Artifacts have NO network access by design. Inline everything: CSS,
+JavaScript, data, and charts as inline SVG or canvas. Anything fetched from
+the internet will silently fail.
 
 Editing files:
 - Never issue two `edit_file` calls for the SAME file in one turn. They are applied in parallel and corrupt each other -- this is a known upstream bug, not a limitation you can be clever about. Make multiple changes to one file either as a single `edit_file` with enough surrounding context, one call per turn, or one `write_file` with the whole corrected file.
@@ -90,6 +100,43 @@ def _scrubbed_env(settings: Settings) -> dict[str, str]:
     return env
 
 
+def make_artifact_tool(store: ArtifactStore, base_url: str):
+    """A `write_artifact` tool bound to one store.
+
+    Built as a closure rather than a module-level function because the tool
+    needs the store and the public URL, and threading those through the model
+    as arguments would let the model choose where files land.
+    """
+    from langchain_core.tools import tool
+
+    @tool
+    def write_artifact(slug: str, html: str) -> str:
+        """Publish a self-contained HTML page the user can open on their phone.
+
+        Use this whenever the answer is better SEEN than described: a chart, a
+        diagram, a table, a mock-up, a rendered document, a small interactive
+        demo.
+
+        slug: short lowercase name, letters/digits/hyphens only (e.g. "sales-chart").
+              Reusing a slug REPLACES that artifact and live-reloads any open view.
+        html: a COMPLETE, self-contained HTML document. Inline all CSS and
+              JavaScript. Inline data directly. Draw charts as inline SVG or on
+              a canvas. There is no network: external scripts, fonts, images and
+              fetch() are blocked by policy, so anything remote will silently
+              fail. Include <title> and a viewport meta -- it is read on a phone.
+
+        Returns the URL to open.
+        """
+        try:
+            artifact = store.write(slug, html)
+        except BadSlug as exc:
+            return f"Rejected: {exc}"
+        logger.info("Wrote artifact %s (%d bytes)", artifact.slug, len(html))
+        return f"Published: {base_url}/a/{artifact.slug}"
+
+    return write_artifact
+
+
 def build_model(settings: Settings, model_name: str | None = None) -> ChatOpenAI:
     """A chat model pointed at Moonshot. See module docstring for the flags."""
     name = model_name or settings.model
@@ -117,6 +164,8 @@ def build_agent(
     *,
     autonomous: bool = False,
     checkpointer: SqliteSaver | None = None,
+    artifact_store: ArtifactStore | None = None,
+    artifact_base_url: str = "http://127.0.0.1:8001",
 ):
     """Compile an agent rooted at `workdir`.
 
@@ -137,9 +186,17 @@ def build_agent(
 
     interrupt_on = {} if autonomous else {t: True for t in settings.interrupt_on}
 
+    # Publishing an artifact is additive and reversible -- it writes outside
+    # the repo and overwrites only its own slug -- so it is deliberately NOT
+    # behind an approval gate. Gating it would mean a tap for every redraw.
+    tools = []
+    if artifact_store is not None:
+        tools.append(make_artifact_tool(artifact_store, artifact_base_url.rstrip("/")))
+
     return create_deep_agent(
         model=build_model(settings),
         system_prompt=SYSTEM_PROMPT.format(workdir=workdir),
+        tools=tools,
         backend=backend,
         middleware=[TodoListMiddleware()],   # opt-in since deepagents 0.7
         interrupt_on=interrupt_on,

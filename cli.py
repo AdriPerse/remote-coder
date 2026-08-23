@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from rcoder.agent import build_agent, open_checkpointer
+from rcoder.artifacts import ArtifactStore
 from rcoder.config import ConfigurationError, load_settings
 
 
@@ -64,6 +65,10 @@ def main() -> int:
     ap.add_argument("--auto", action="store_true", help="run without approval gates")
     ap.add_argument("--thread", default="cli", help="session id to resume")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--artifacts", metavar="DIR", default=None,
+                    help="enable write_artifact, publishing into DIR")
+    ap.add_argument("--artifact-url", default="http://127.0.0.1:8001",
+                    help="public base URL of the artifact server")
     args = ap.parse_args()
 
     logging.basicConfig(
@@ -77,11 +82,14 @@ def main() -> int:
         print("Configuration error: {}".format(exc), file=sys.stderr)
         return 2
 
+    store = ArtifactStore(Path(args.artifacts).resolve()) if args.artifacts else None
     agent = build_agent(
         settings,
         Path(args.workdir),
         autonomous=args.auto,
         checkpointer=open_checkpointer(settings),
+        artifact_store=store,
+        artifact_base_url=args.artifact_url,
     )
     config = {"configurable": {"thread_id": args.thread}, "recursion_limit": 100}
 

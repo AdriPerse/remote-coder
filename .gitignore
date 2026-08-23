@@ -6,3 +6,4 @@ state/
 *.db
 *.db-shm
 *.db-wal
+artifacts/

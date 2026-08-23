@@ -52,6 +52,36 @@ this machine.
 
 Anything that is not a command is a task for the agent.
 
+## Artifacts
+
+When the answer is better seen than described, the agent calls
+`write_artifact(slug, html)` and you get a link. Open it on your phone, type
+a change into the box at the bottom, and the page reloads itself when the
+agent rewrites the file.
+
+    python artifact_server.py --root ./artifacts --port 8001 --host 0.0.0.0
+    python cli.py <repo> "<task>" --artifacts ./artifacts
+
+Run it on its own port, which makes it its own **origin**. Three layers of
+isolation, and each one is load-bearing:
+
+- `sandbox="allow-scripts allow-downloads"`, deliberately **without**
+  `allow-same-origin` -- the artifact gets a null opaque origin, so no
+  cookies, no localStorage, no reach into the parent page. `allow-scripts`
+  together with `allow-same-origin` would be a full sandbox escape.
+- A CSP injected as the **first** `<meta>` in `<head>`, so it overrides
+  anything the model wrote. The clause that matters is `connect-src 'none'`:
+  inline script still runs, but fetch/XHR/WebSocket are dead, so a generated
+  page cannot phone home with whatever it just read.
+- `srcdoc`, not a `blob:` URL -- a blob URL inherits the creating page's
+  origin and would quietly undo the first layer.
+
+Consequence the agent is told about up front: artifacts have **no network**.
+Everything is inlined -- CSS, data, charts as inline SVG.
+
+Slugs are `[a-z0-9-]{1,64}` and anything else is **refused, not sanitised**.
+Cleaning a hostile path is how traversal bugs get written.
+
 ## Things learned the hard way
 
 - `use_responses_api=False` is REQUIRED. langchain-openai defaults to OpenAI's
