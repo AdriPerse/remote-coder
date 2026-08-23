@@ -31,6 +31,27 @@ construction, and the model is a per-token API key you can point anywhere.
 `--auto` drops the approval gates. Without it, every `execute`, `write_file`,
 `edit_file` and `delete` waits for your approval.
 
+## Status
+
+Working and tested end to end from the terminal. The Telegram side is
+written and unit-tested but has never talked to a real bot -- it needs a
+token from @BotFather, which is the one thing that cannot be done from
+this machine.
+
+    python -m unittest discover -s tests     # 23 tests, no key or token needed
+
+## Commands (from the phone)
+
+    /repo <full path>   point me at a repository
+    /new [title]        fresh session, same repo
+    /sessions           list recent sessions
+    /resume <part>      switch to an earlier session
+    /auto on|off        run without approval prompts
+    /cost               tokens and estimated spend
+    /cancel             stop the running task
+
+Anything that is not a command is a task for the agent.
+
 ## Things learned the hard way
 
 - `use_responses_api=False` is REQUIRED. langchain-openai defaults to OpenAI's

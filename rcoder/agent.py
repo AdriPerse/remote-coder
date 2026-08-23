@@ -158,3 +158,19 @@ def open_checkpointer(settings: Settings) -> SqliteSaver:
     """
     conn = sqlite3.connect(settings.checkpoint_db, check_same_thread=False)
     return SqliteSaver(conn)
+
+
+def open_async_checkpointer(settings: Settings):
+    """Async checkpointer for the bot's event loop.
+
+    SqliteSaver raises NotImplementedError on every async method, so the
+    Telegram side -- which is async all the way down -- must use this one.
+    The CLI keeps the sync saver. Both read and write the same file and the
+    same format, so a session started from the terminal resumes on the phone.
+
+    Returns an async context manager: the caller owns its lifetime, because
+    the connection must stay open for as long as the bot polls.
+    """
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    return AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_db))
