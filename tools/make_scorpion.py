@@ -1,206 +1,138 @@
-"""Draws the robot-scorpion mark for the bot, as SVG.
+"""The bot's avatar: a sibling of the MusicLore scorpion badge.
 
-Generated rather than hand-written: the tail is a tapered curl of segments
-marching along an arc, which is miserable to place by hand and trivial to
-compute.
+The first two attempts failed because they invented a visual language --
+thin cyan outlines, glows, gradients -- while the MusicLore icon is flat,
+chunky, strokeless shapes in a limited palette inside a ring. Matching the
+family meant copying the GRAMMAR, not the subject:
 
-The lesson from the first attempt is baked in here: placing discrete
-segments along a curve only reads as a TAIL if consecutive segments
-overlap. Spacing greater than segment width gives a dotted line of debris.
-So the tail is drawn twice -- a solid tapered spine first, segments on top
--- and continuity no longer depends on the spacing arithmetic working out.
+    circular badge, bold ring, near-black field
+    top-down scorpion, head up, claws forward at the bottom
+    solid fills, no outlines, no gradients, no glow
+    chevron legs, a curled tail cluster behind the head
+
+The "coder" reading comes from the silhouette rather than decoration:
+the claws are square brackets, and the carapace carries a terminal prompt.
+A cyan ring instead of MusicLore's red says same family, different app.
 
     python tools/make_scorpion.py > scorpion.svg
 """
 
 from __future__ import annotations
 
-import math
-
-W = H = 512
+S = 512
 CX = 256.0
 
-BG_OUTER = "#0a0e13"
-BG_INNER = "#17222e"
-PLATE = "#22323f"
-PLATE_HI = "#31485c"
-EDGE = "#4fd6e0"
-EDGE_DIM = "#2f8792"
-AMBER = "#ffb347"
-AMBER_HOT = "#ffe0a8"
-
-# The tail arc: starts below the body, sweeps up the right, curls over the
-# head. SVG angles: 90 is straight down, 0 is right, -90 is straight up.
-ARC_CX, ARC_CY, ARC_R = 262.0, 258.0, 132.0
-ARC_START, ARC_END = 88.0, -98.0
-TAIL_W0, TAIL_W1 = 34.0, 15.0
+FIELD = "#111318"        # near-black badge interior
+RING = "#3ad0c8"         # cyan-green: the sibling of MusicLore's red
+SHELL = "#46596b"        # carapace
+SHELL_DK = "#33424f"     # tail cluster, shadowed parts
+FACE = "#8aa0b2"         # lighter face plate, as in the reference
+EYE = "#14171c"
+PROMPT = "#7ee787"       # terminal green
+LIMB = "#2b3742"
 
 
-def arc_point(t: float) -> tuple[float, float, float]:
-    """(x, y, angle_rad) at fraction t along the tail arc."""
-    a = math.radians(ARC_START + (ARC_END - ARC_START) * t)
-    return ARC_CX + ARC_R * math.cos(a), ARC_CY + ARC_R * math.sin(a), a
-
-
-def hexagon(cx: float, cy: float, r: float, rot: float) -> str:
-    pts = []
-    for i in range(6):
-        a = math.radians(rot + i * 60)
-        pts.append(f"{cx + r * math.cos(a):.1f},{cy + r * math.sin(a):.1f}")
-    return " ".join(pts)
-
-
-def tail() -> list[str]:
-    out = []
-    steps = 40
-    left, right = [], []
-    for i in range(steps + 1):
-        t = i / steps
-        x, y, a = arc_point(t)
-        half = TAIL_W0 + (TAIL_W1 - TAIL_W0) * t
-        nx, ny = math.cos(a), math.sin(a)          # radial normal
-        left.append(f"{x + half * nx:.1f},{y + half * ny:.1f}")
-        right.append(f"{x - half * nx:.1f},{y - half * ny:.1f}")
-    # One solid tapered spine. Segment overlap is now cosmetic, not load-bearing.
-    out.append(
-        f'<polygon points="{" ".join(left + right[::-1])}" fill="{PLATE}" '
-        f'stroke="{EDGE_DIM}" stroke-width="2.5" stroke-linejoin="round"/>'
-    )
-    # Segment plates on top.
-    n = 9
-    for i in range(n):
-        t = i / (n - 1) * 0.94
-        x, y, a = arc_point(t)
-        half = TAIL_W0 + (TAIL_W1 - TAIL_W0) * t
-        out.append(
-            f'<polygon points="{hexagon(x, y, half * 0.86, math.degrees(a))}" '
-            f'fill="{PLATE_HI}" stroke="{EDGE_DIM}" stroke-width="2"/>'
-        )
-        out.append(
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{half * 0.24:.1f}" '
-            f'fill="{EDGE}" opacity="{0.3 + 0.55 * t:.2f}"/>'
-        )
-    # Stinger: continues along the tangent at the end of the arc.
-    ex, ey, ea = arc_point(1.0)
-    tangent = ea - math.pi / 2 if ARC_END < ARC_START else ea + math.pi / 2
-    tipx, tipy = ex + 74 * math.cos(tangent), ey + 74 * math.sin(tangent)
-    perp = tangent + math.pi / 2
-    b1 = (ex + (TAIL_W1 + 4) * math.cos(perp), ey + (TAIL_W1 + 4) * math.sin(perp))
-    b2 = (ex - (TAIL_W1 + 4) * math.cos(perp), ey - (TAIL_W1 + 4) * math.sin(perp))
-    out.append(
-        f'<polygon points="{b1[0]:.1f},{b1[1]:.1f} {b2[0]:.1f},{b2[1]:.1f} '
-        f'{tipx:.1f},{tipy:.1f}" fill="url(#sting)" stroke="{AMBER}" '
-        f'stroke-width="2.5" stroke-linejoin="round"/>'
-    )
-    out.append(
-        f'<circle cx="{tipx:.1f}" cy="{tipy:.1f}" r="10" fill="{AMBER_HOT}" '
-        f'filter="url(#glow)"/>'
-    )
-    return out
+def badge() -> list[str]:
+    return [
+        f'<circle cx="{CX}" cy="{CX}" r="248" fill="{FIELD}"/>',
+        f'<circle cx="{CX}" cy="{CX}" r="228" fill="none" stroke="{RING}" '
+        f'stroke-width="22"/>',
+    ]
 
 
 def legs() -> list[str]:
+    """Chevrons either side, as in the reference: thin, angular, no joints."""
     out = []
-    for y, angle, length in [(298.0, 16.0, 78.0), (326.0, 34.0, 84.0),
-                             (352.0, 52.0, 76.0)]:
+    for i, y in enumerate((214.0, 254.0, 294.0)):
+        reach = 74 - i * 4
         for side in (-1, 1):
-            a = math.radians(angle)
-            hx = CX + side * 26
-            kx = hx + side * length * 0.62
-            ky = y + length * 0.62 * math.sin(a)
-            fx = kx + side * length * 0.42
-            fy = ky + length * 0.5
-            d = (f"M{hx:.0f},{y:.0f} L{kx:.0f},{ky:.0f} L{fx:.0f},{fy:.0f}")
-            out.append(f'<path d="{d}" fill="none" stroke="{PLATE_HI}" '
-                       f'stroke-width="15" stroke-linecap="round" '
+            x0 = CX + side * 60
+            x1 = x0 + side * reach * 0.55
+            x2 = x1 + side * reach * 0.45
+            d = (f"M{x0:.0f},{y - 16:.0f} L{x1:.0f},{y:.0f} "
+                 f"L{x2:.0f},{y - 18:.0f}")
+            out.append(f'<path d="{d}" fill="none" stroke="{LIMB}" '
+                       f'stroke-width="13" stroke-linecap="round" '
                        f'stroke-linejoin="round"/>')
-            out.append(f'<path d="{d}" fill="none" stroke="{EDGE_DIM}" '
-                       f'stroke-width="3" stroke-linecap="round" '
-                       f'stroke-linejoin="round" opacity="0.85"/>')
-            out.append(f'<circle cx="{kx:.0f}" cy="{ky:.0f}" r="5.5" '
-                       f'fill="{EDGE_DIM}"/>')
     return out
 
 
-def claw(side: int) -> list[str]:
-    """A forward-reaching pedipalp ending in an open pincer."""
-    sx, sy = CX + side * 46, 252.0            # shoulder, at the body
-    ex, ey = CX + side * 112, 208.0           # elbow, out to the side
-    hx, hy = CX + side * 122, 150.0           # pincer hinge, forward
-    arm = f"M{sx:.0f},{sy:.0f} L{ex:.0f},{ey:.0f} L{hx:.0f},{hy:.0f}"
-    out = [
-        f'<path d="{arm}" fill="none" stroke="{PLATE_HI}" stroke-width="26" '
-        f'stroke-linecap="round" stroke-linejoin="round"/>',
-        f'<path d="{arm}" fill="none" stroke="{EDGE_DIM}" stroke-width="4.5" '
-        f'stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>',
-    ]
-    # Two jaws opening forward/up, clearly a pincer rather than a fork.
-    jaws = [
-        (hx + side * 52, hy - 54, hx + side * 58, hy - 4),     # outer
-        (hx - side * 20, hy - 66, hx + side * 4, hy - 16),     # inner
-    ]
-    for tipx, tipy, ctrlx, ctrly in jaws:
-        d = f"M{hx:.0f},{hy:.0f} Q{ctrlx:.0f},{ctrly:.0f} {tipx:.0f},{tipy:.0f}"
-        out.append(f'<path d="{d}" fill="none" stroke="{PLATE_HI}" '
-                   f'stroke-width="19" stroke-linecap="round"/>')
-        out.append(f'<path d="{d}" fill="none" stroke="{EDGE}" '
-                   f'stroke-width="3" stroke-linecap="round" opacity="0.65"/>')
-    out.append(f'<circle cx="{hx:.0f}" cy="{hy:.0f}" r="14" fill="{PLATE}" '
-               f'stroke="{EDGE_DIM}" stroke-width="3.5"/>')
+def tail() -> list[str]:
+    """A curled cluster behind the head, matching the reference's blob,
+    but ordered so it still reads as segments tapering to a stinger."""
+    out = []
+    blobs = [(300.0, 150.0, 26.0), (286.0, 118.0, 23.0), (262.0, 100.0, 20.0),
+             (234.0, 96.0, 17.0), (210.0, 104.0, 14.0)]
+    for x, y, r in blobs:
+        out.append(f'<circle cx="{x}" cy="{y}" r="{r}" fill="{SHELL_DK}"/>')
+    # Stinger: a small solid wedge, no glow -- the reference has no glow.
+    # Chunky enough to read at avatar size, and overlapping the last
+    # segment so it is part of the tail rather than floating beside it.
+    out.append(f'<path d="M216,114 L206,86 L172,98 Z" fill="{RING}"/>')
+    return out
+
+
+def claws() -> list[str]:
+    """Chunky bottom claws, shaped as square brackets.
+
+    The reference's claws are already blocky rounded rectangles with a
+    notch; making the notch read as `[` and `]` costs nothing and is the
+    whole 'coder' idea in one shape.
+    """
+    out = []
+    for side in (-1, 1):
+        x = CX + side * 118
+        # Outer bar of the bracket
+        out.append(f'<rect x="{x - 30:.0f}" y="300" width="60" height="118" '
+                   f'rx="18" fill="{SHELL}"/>')
+        # The notch: a field-coloured cut that turns the block into a bracket,
+        # opening toward the centre so left reads "[" and right reads "]".
+        nx = x - 30 + (34 if side < 0 else 0)
+        out.append(f'<rect x="{nx:.0f}" y="326" width="34" height="66" '
+                   f'rx="10" fill="{FIELD}"/>')
+        # Arm connecting the claw up to the body.
+        out.append(f'<path d="M{x - side * 6:.0f},308 L{CX + side * 54:.0f},288" '
+                   f'fill="none" stroke="{LIMB}" stroke-width="20" '
+                   f'stroke-linecap="round"/>')
     return out
 
 
 def body() -> list[str]:
     out = []
-    for y, w in [(292, 70), (320, 64), (346, 56), (370, 46)]:
-        out.append(f'<rect x="{CX - w / 2:.0f}" y="{y}" width="{w}" height="24" '
-                   f'rx="9" fill="{PLATE}" stroke="{EDGE_DIM}" stroke-width="2"/>')
-        out.append(f'<line x1="{CX - w / 2 + 11:.0f}" y1="{y + 12}" '
-                   f'x2="{CX + w / 2 - 11:.0f}" y2="{y + 12}" stroke="{EDGE}" '
-                   f'stroke-width="2" opacity="0.4"/>')
-    out.append(f'<polygon points="{hexagon(CX, 258, 58, 90)}" fill="{PLATE_HI}" '
-               f'stroke="{EDGE}" stroke-width="3.5"/>')
-    out.append(f'<path d="M{CX - 32:.0f},240 h20 v-15 h24 v15 h20" fill="none" '
-               f'stroke="{EDGE}" stroke-width="2.5" opacity="0.5" '
-               f'stroke-linecap="round" stroke-linejoin="round"/>')
-    out.append(f'<path d="M{CX - 26:.0f},282 h22 v13 h14" fill="none" '
-               f'stroke="{EDGE}" stroke-width="2.5" opacity="0.35" '
-               f'stroke-linecap="round" stroke-linejoin="round"/>')
-    out.append(f'<circle cx="{CX:.0f}" cy="260" r="18" fill="#0c141d" '
-               f'stroke="{EDGE}" stroke-width="3.5"/>')
-    out.append(f'<circle cx="{CX:.0f}" cy="260" r="9" fill="{AMBER}" '
-               f'filter="url(#glow)"/>')
-    out.append(f'<circle cx="{CX - 3:.0f}" cy="257" r="3.2" fill="{AMBER_HOT}"/>')
+    # Carapace: a teardrop, wide at the bottom, rounded at the top.
+    out.append(
+        f'<path d="M{CX},128 '
+        f'C{CX + 46},128 {CX + 74},176 {CX + 74},232 '
+        f'L{CX + 74},288 C{CX + 74},322 {CX + 40},340 {CX},340 '
+        f'C{CX - 40},340 {CX - 74},322 {CX - 74},288 '
+        f'L{CX - 74},232 C{CX - 74},176 {CX - 46},128 {CX},128 Z" '
+        f'fill="{SHELL}"/>'
+    )
+    # Face plate, as in the reference: a lighter rounded block low on the body.
+    out.append(f'<rect x="{CX - 62:.0f}" y="268" width="124" height="86" '
+               f'rx="34" fill="{FACE}"/>')
+    out.append(f'<circle cx="{CX - 26:.0f}" cy="302" r="13" fill="{EYE}"/>')
+    out.append(f'<circle cx="{CX + 26:.0f}" cy="302" r="13" fill="{EYE}"/>')
+    # Terminal prompt on the carapace: the coder tell, in the icon's own
+    # flat language -- solid strokes, no outline, no glow.
+    out.append(f'<path d="M{CX - 34:.0f},186 L{CX - 10:.0f},206 '
+               f'L{CX - 34:.0f},226" fill="none" stroke="{PROMPT}" '
+               f'stroke-width="14" stroke-linecap="round" '
+               f'stroke-linejoin="round"/>')
+    out.append(f'<rect x="{CX + 2:.0f}" y="216" width="42" height="13" '
+               f'rx="6" fill="{PROMPT}"/>')
     return out
 
 
 def svg() -> str:
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
-        f'width="{W}" height="{H}">',
-        "<defs>",
-        f'<radialGradient id="bg" cx="50%" cy="44%" r="74%">'
-        f'<stop offset="0%" stop-color="{BG_INNER}"/>'
-        f'<stop offset="100%" stop-color="{BG_OUTER}"/></radialGradient>',
-        f'<linearGradient id="sting" x1="0" y1="1" x2="0" y2="0">'
-        f'<stop offset="0%" stop-color="{AMBER}"/>'
-        f'<stop offset="100%" stop-color="{AMBER_HOT}"/></linearGradient>',
-        '<filter id="glow" x="-140%" y="-140%" width="380%" height="380%">'
-        '<feGaussianBlur stdDeviation="7" result="b"/>'
-        '<feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/>'
-        "</feMerge></filter>",
-        "</defs>",
-        f'<rect width="{W}" height="{H}" fill="url(#bg)"/>',
-        '<g opacity="0.12" stroke="#4fd6e0" stroke-width="1">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {S} {S}" '
+        f'width="{S}" height="{S}">'
     ]
-    for i in range(1, 8):
-        parts.append(f'<line x1="0" y1="{i * 64}" x2="{W}" y2="{i * 64}"/>')
-        parts.append(f'<line x1="{i * 64}" y1="0" x2="{i * 64}" y2="{H}"/>')
-    parts.append("</g>")
+    parts += badge()
     parts += legs()
     parts += tail()
-    parts += claw(-1)
-    parts += claw(1)
+    parts += claws()
     parts += body()
     parts.append("</svg>")
     return "\n".join(parts)
