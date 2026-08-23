@@ -7,3 +7,4 @@ state/
 *.db-shm
 *.db-wal
 artifacts/
+logs/

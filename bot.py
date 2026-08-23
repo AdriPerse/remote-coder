@@ -70,6 +70,12 @@ class Bot:
         if chat is None or chat.id != self.settings.allowed_chat_id:
             logger.warning("Rejected message from chat %s", chat.id if chat else "?")
             return False
+        # Log what arrived, always. A handler that runs silently cannot be
+        # told apart from one that never fired, and reading the log
+        # afterwards then shows an idle bot that looks frozen.
+        message = update.effective_message
+        if message is not None:
+            logger.info("<- %s", short(message.text or "<non-text>", 100))
         return True
 
     def agent_for(self, session, autonomous: bool):
