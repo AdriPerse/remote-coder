@@ -14,8 +14,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# Scanned in order; missing roots are skipped silently.
-DEFAULT_ROOTS = (r"C:\Projects", r"C:\Users\Perguzan\Documents")
+# Scanned in order; missing roots are skipped silently. Personal layouts
+# belong in RC_REPO_ROOTS (semicolon-separated), not in this default.
+DEFAULT_ROOTS = (str(Path.home() / "Projects"), str(Path.home() / "Documents"))
 MAX_CHOICES = 8
 
 
