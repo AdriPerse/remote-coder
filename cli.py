@@ -3,7 +3,10 @@
 Exists so the agent can be developed and proven before a bot token does,
 and so there is always a way in when the transport is broken.
 
-    python cli.py <workdir> "<task>" [--auto] [--thread NAME]
+    python cli.py <workdir> ["<task>"] [--auto] [--thread NAME]
+
+With no task, drops into an interactive session: the scorpion banner,
+then a prompt per task until /exit.
 """
 
 from __future__ import annotations
@@ -11,11 +14,38 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import uuid
 from pathlib import Path
 
 from rcoder.agent import build_agent, iter_node_updates, open_checkpointer
 from rcoder.artifacts import ArtifactStore
 from rcoder.config import ConfigurationError, load_settings
+
+
+# The robot-scorpion mark, flattened to ASCII. Matches the SVG badge:
+# tail curled over the back, stinger up-left, claws forward.
+BANNER = r"""
+                       _
+                      / \
+                      \_\
+        __          _/   \_
+       /  \___ ____/       \____ ___/  \
+      |   _/   \               /   \_   |
+       \_/      \   >  -  <   /      \_/
+                 |  __[_]__  |
+        ___      | /       \ |      ___
+       /   \____/ |  _____  | \____/   \
+       \_/        | |     | |        \_/
+                  | |_____| |
+                   \_______/
+              R E M O T E   C O D E R
+"""
+
+INTERACTIVE_HELP = """Type a task, Enter to run it.
+  /new     fresh session (new thread)
+  /auto    toggle approval prompts
+  /exit    quit (Ctrl+C works too)
+"""
 
 
 def render(msg):
@@ -61,7 +91,8 @@ def main() -> int:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("workdir")
-    ap.add_argument("task")
+    ap.add_argument("task", nargs="?", default=None,
+                    help="omit for an interactive session")
     ap.add_argument("--auto", action="store_true", help="run without approval gates")
     ap.add_argument("--thread", default="cli", help="session id to resume")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -83,22 +114,69 @@ def main() -> int:
         return 2
 
     store = ArtifactStore(Path(args.artifacts).resolve()) if args.artifacts else None
-    agent = build_agent(
-        settings,
-        Path(args.workdir),
-        autonomous=args.auto,
-        checkpointer=open_checkpointer(settings),
-        artifact_store=store,
-        artifact_base_url=args.artifact_url,
-        session_id=args.thread,
-    )
-    config = {"configurable": {"thread_id": args.thread}, "recursion_limit": 100}
 
-    print("[{}] {} :: {}".format(settings.model, args.workdir, args.task))
-    print("-" * 60)
-    for line in stream(agent, args.task, config):
-        print(line, flush=True)
-    return 0
+    # State the REPL can mutate: a /new mints a fresh thread and agent,
+    # /auto rebuilds the agent with different gates. One-shot mode never
+    # touches these after the first build.
+    state = {"thread": args.thread, "auto": args.auto, "agent": None}
+
+    def rebuild() -> None:
+        state["agent"] = build_agent(
+            settings,
+            Path(args.workdir),
+            autonomous=state["auto"],
+            checkpointer=open_checkpointer(settings),
+            artifact_store=store,
+            artifact_base_url=args.artifact_url,
+            session_id=state["thread"],
+        )
+
+    def run(task: str) -> None:
+        print("[{}] {} :: {}".format(settings.model, args.workdir, task))
+        print("-" * 60)
+        config = {
+            "configurable": {"thread_id": state["thread"]},
+            "recursion_limit": 100,
+        }
+        for line in stream(state["agent"], task, config):
+            print(line, flush=True)
+
+    rebuild()
+    if args.task is not None:
+        run(args.task)
+        return 0
+
+    print(BANNER)
+    print("[{}] workdir={} thread={} auto={}".format(
+        settings.model, args.workdir, state["thread"],
+        "on" if state["auto"] else "off"))
+    print(INTERACTIVE_HELP)
+    while True:
+        try:
+            task = input("scorpion> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not task:
+            continue
+        if task in ("/exit", "/quit"):
+            return 0
+        if task == "/new":
+            state["thread"] = "cli-" + uuid.uuid4().hex[:8]
+            rebuild()
+            print("fresh session: {}".format(state["thread"]))
+            continue
+        if task == "/auto":
+            state["auto"] = not state["auto"]
+            rebuild()
+            print("approvals {}.".format(
+                "OFF - running autonomously" if state["auto"] else "on"))
+            continue
+        try:
+            run(task)
+        except KeyboardInterrupt:
+            print("\n(interrupted - session kept, type another task or /exit)")
+        print()
 
 
 if __name__ == "__main__":
