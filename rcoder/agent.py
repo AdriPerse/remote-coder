@@ -28,6 +28,7 @@ import os
 import sqlite3
 from pathlib import Path
 
+import httpx
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
 from langchain.agents.middleware import TodoListMiddleware
@@ -38,6 +39,26 @@ from rcoder.artifacts import ArtifactStore, BadSlug
 from rcoder.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def iter_node_updates(update):
+    """Yield (node, payload) from one LangGraph `updates` stream chunk.
+
+    `stream_mode="updates"` + `subgraphs=True` is usually a dict of
+    node -> state. Some nodes emit a (name, payload) pair instead, and
+    some payloads are not dicts. Calling `.items()` / `.get()` on those
+    used to crash the Telegram loop mid-task, which looks like a mute bot.
+    """
+    if isinstance(update, dict):
+        pairs = update.items()
+    elif isinstance(update, tuple) and len(update) == 2:
+        pairs = (update,)
+    else:
+        return
+    for node, data in pairs:
+        if isinstance(data, dict):
+            yield node, data
+
 
 SYSTEM_PROMPT = """\
 You are a coding agent working directly on the user's machine, driven from \
@@ -98,6 +119,53 @@ def _scrubbed_env(settings: Settings) -> dict[str, str]:
         logger.info("Scrubbed %d secret(s) from agent shell env: %s",
                     len(removed), ", ".join(removed))
     return env
+
+
+TAVILY_URL = "https://api.tavily.com/search"
+
+
+def make_search_tool(api_key: str):
+    """A `web_search` tool backed by Tavily.
+
+    The key is captured in the closure rather than read from the environment
+    at call time, because the agent's shell env is scrubbed -- a tool that
+    "helpfully" passes env vars through would leak the very keys we scrub.
+    """
+    from langchain_core.tools import tool
+
+    @tool
+    def web_search(query: str, max_results: int = 5) -> str:
+        """Search the live web. Use for current facts, docs, error messages,
+        release notes -- anything where your training data may be stale.
+        Do NOT use it to fetch a URL you already know; use the shell's curl
+        for that. Returns titles, URLs and short extracts."""
+        try:
+            resp = httpx.post(
+                TAVILY_URL,
+                json={
+                    "api_key": api_key,
+                    "query": query,
+                    "max_results": max(1, min(max_results, 10)),
+                    "search_depth": "basic",
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 - report, never crash the run
+            return f"Search failed: {type(exc).__name__}: {exc}"
+        results = resp.json().get("results") or []
+        if not results:
+            return "No results."
+        return "\n\n".join(
+            "{title}\n{url}\n{content}".format(
+                title=r.get("title", ""),
+                url=r.get("url", ""),
+                content=(r.get("content") or "")[:500],
+            )
+            for r in results
+        )
+
+    return web_search
 
 
 def make_artifact_tool(
@@ -202,6 +270,10 @@ def build_agent(
                 artifact_store, artifact_base_url.rstrip("/"), session_id, workdir
             )
         )
+    # Optional: live web search. No key -> no tool, the agent never misses it.
+    tavily_key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if tavily_key:
+        tools.append(make_search_tool(tavily_key))
 
     return create_deep_agent(
         model=build_model(settings),

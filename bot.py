@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 from langgraph.types import Command
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -25,9 +26,9 @@ from telegram.ext import (
     filters,
 )
 
-from rcoder.agent import build_agent, open_async_checkpointer
+from rcoder.agent import build_agent, iter_node_updates, open_async_checkpointer
 from rcoder.config import ConfigurationError, load_settings
-from rcoder.pricing import estimate_cost
+from rcoder.pricing import PRICES, estimate_cost
 from rcoder.progress import Progress
 from rcoder.repos import discover
 from rcoder.sessions import SessionStore
@@ -43,8 +44,29 @@ HELP = """Send a message and I work on it in the current repo.
 /auto on|off       - run without approval prompts
 /cost              - tokens and estimated spend
 /cancel            - stop the running task
+/status            - repo, session, model, state
+/logs [n]          - last n lines of the bot log
+/model [name]      - show or switch the model
 /help              - this
 """
+
+# (command, one-line description) -- shown in Telegram's "/" menu. Keep
+# descriptions under 256 chars and commands lowercase, per Bot API limits.
+COMMANDS = [
+    ("repo", "point me at a repository"),
+    ("new", "start a fresh session in the same repo"),
+    ("sessions", "list recent sessions"),
+    ("resume", "switch to an earlier session"),
+    ("auto", "run without approval prompts"),
+    ("cost", "tokens and estimated spend"),
+    ("cancel", "stop the running task"),
+    ("status", "repo, session, model, state"),
+    ("logs", "last n lines of the bot log"),
+    ("model", "show or switch the model"),
+    ("help", "list commands"),
+]
+
+LOG_PATH = Path(__file__).resolve().parent / "logs" / "bot.log"
 
 
 def short(value, limit: int = 70) -> str:
@@ -67,6 +89,7 @@ class Bot:
         # chat -> the repo list currently on offer. Lost on restart,
         # which is handled rather than ignored: a stale tap says so.
         self.repo_choices: dict[int, list[Path]] = {}
+        self.started_at = time.monotonic()
 
     # -- guards -----------------------------------------------------------
     def authorised(self, update: Update) -> bool:
@@ -285,6 +308,73 @@ class Bot:
         else:
             await update.message.reply_text("Nothing is running.")
 
+    async def cmd_status(self, update: Update, _ctx) -> None:
+        if not self.authorised(update):
+            return
+        chat_id = update.effective_chat.id
+        session = self.store.current(chat_id)
+        minutes = int((time.monotonic() - self.started_at) // 60)
+        lines = [
+            "Uptime: {}h {:02d}m".format(minutes // 60, minutes % 60),
+            "State: {}".format("working on a task" if self.busy.get(chat_id) else "idle"),
+            "Model: {} (reasoning {})".format(
+                self.settings.model, self.settings.reasoning_effort
+            ),
+            "Approvals: {}".format(
+                "OFF (autonomous)" if self.store.autonomous(chat_id) else "ON"
+            ),
+        ]
+        if session is not None:
+            lines.append("Repo: {}".format(session.workdir))
+            lines.append("Session: {}{}".format(
+                session.thread_id,
+                " - {}".format(session.title) if session.title else "",
+            ))
+        else:
+            lines.append("Repo: none set - /repo to pick one")
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_logs(self, update: Update, ctx) -> None:
+        if not self.authorised(update):
+            return
+        try:
+            count = int(ctx.args[0]) if ctx.args else 20
+        except ValueError:
+            count = 20
+        count = max(1, min(count, 100))
+        if not LOG_PATH.exists():
+            await update.message.reply_text("No log file at {} yet.".format(LOG_PATH))
+            return
+        lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = lines[-count:] or ["(log is empty)"]
+        text = "\n".join(tail)
+        await update.message.reply_text(
+            text[-3900:] if len(text) > 3900 else text
+        )
+
+    async def cmd_model(self, update: Update, ctx) -> None:
+        if not self.authorised(update):
+            return
+        known = ", ".join(sorted(PRICES))
+        if not ctx.args:
+            await update.message.reply_text(
+                "Model: {} (reasoning {})\nPriced models: {}\n"
+                "Usage: /model <name> - applies to the next task.".format(
+                    self.settings.model, self.settings.reasoning_effort, known
+                )
+            )
+            return
+        name = ctx.args[0].strip()
+        if name == self.settings.model:
+            await update.message.reply_text("Already running {}.".format(name))
+            return
+        # Settings is frozen; the swap is cheap because agents are built per task.
+        object.__setattr__(self.settings, "model", name)
+        priced = "priced" if name in PRICES else "UNPRICED - /cost will show nothing"
+        await update.message.reply_text(
+            "Next tasks will use {} ({}).".format(name, priced)
+        )
+
     # -- the actual work --------------------------------------------------
     async def on_message(self, update: Update, _ctx) -> None:
         if not self.authorised(update):
@@ -338,8 +428,8 @@ class Bot:
                     progress.add("cancelled")
                     break
                 prefix = "[{}] ".format(ns[0].split(":")[0]) if ns else ""
-                for _node, data in (update or {}).items():
-                    for msg in (data or {}).get("messages", []) or []:
+                for _node, data in iter_node_updates(update):
+                    for msg in data.get("messages") or []:
                         line, text = self.describe(msg, session)
                         if line:
                             progress.add(prefix + line)
@@ -489,6 +579,10 @@ class Bot:
         self._checkpointer_cm = open_async_checkpointer(self.settings)
         self.checkpointer = await self._checkpointer_cm.__aenter__()
         logger.info("Checkpointer open at %s", self.settings.checkpoint_db)
+        # Register the command menu so typing "/" in Telegram pops the list.
+        await self.app.bot.set_my_commands(
+            [BotCommand(name, desc) for name, desc in COMMANDS]
+        )
 
     async def on_shutdown(self, _app) -> None:
         if self._checkpointer_cm is not None:
@@ -513,6 +607,9 @@ class Bot:
         self.app.add_handler(CommandHandler("auto", self.cmd_auto))
         self.app.add_handler(CommandHandler("cost", self.cmd_cost))
         self.app.add_handler(CommandHandler("cancel", self.cmd_cancel))
+        self.app.add_handler(CommandHandler("status", self.cmd_status))
+        self.app.add_handler(CommandHandler("logs", self.cmd_logs))
+        self.app.add_handler(CommandHandler("model", self.cmd_model))
         self.app.add_handler(CallbackQueryHandler(self.on_callback))
         self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message)

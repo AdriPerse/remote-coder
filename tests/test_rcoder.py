@@ -94,6 +94,36 @@ class TestSecretScrubbing(unittest.TestCase):
         self.assertNotIn("RC_TELEGRAM_TOKEN", scrubbed)
 
 
+class TestIterNodeUpdates(unittest.TestCase):
+    """LangGraph stream chunks must not crash the Telegram loop."""
+
+    def test_dict_chunks_yield_dict_payloads(self):
+        from rcoder.agent import iter_node_updates
+
+        msg = object()
+        pairs = list(iter_node_updates({"agent": {"messages": [msg]}}))
+        self.assertEqual(pairs, [("agent", {"messages": [msg]})])
+
+    def test_tuple_chunk_with_dict_payload_is_accepted(self):
+        from rcoder.agent import iter_node_updates
+
+        payload = {"messages": [object()]}
+        pairs = list(iter_node_updates(("tools", payload)))
+        self.assertEqual(pairs, [("tools", payload)])
+
+    def test_tuple_payload_is_skipped_not_crashed(self):
+        """This is the live failure: `'tuple' object has no attribute 'get'`."""
+        from rcoder.agent import iter_node_updates
+
+        self.assertEqual(list(iter_node_updates(("tools", ("not", "a dict")))), [])
+        self.assertEqual(list(iter_node_updates(("tools", None))), [])
+        self.assertEqual(list(iter_node_updates(None)), [])
+        self.assertEqual(
+            list(iter_node_updates({"ok": {"messages": []}, "bad": (1, 2)})),
+            [("ok", {"messages": []})],
+        )
+
+
 class TestSessions(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -209,6 +239,76 @@ class TestProgress(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestInfoCommands(unittest.IsolatedAsyncioTestCase):
+    """/status, /logs and /model: read-only except the deliberate model swap."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bot = make_bot(self.tmp.name)
+
+    def tearDown(self):
+        self.bot.store.close()
+        self.tmp.cleanup()
+
+    async def test_status_without_repo_says_so(self):
+        update = FakeUpdate(chat_id=42)
+        await self.bot.cmd_status(update, FakeCtx())
+        text = update.message.replies[0]
+        self.assertIn("kimi-k3", text)
+        self.assertIn("Uptime:", text)
+        self.assertIn("none set", text)
+
+    async def test_status_reports_the_current_session(self):
+        self.bot.store.create(42, Path(self.tmp.name), "titled work")
+        update = FakeUpdate(chat_id=42)
+        await self.bot.cmd_status(update, FakeCtx())
+        text = update.message.replies[0]
+        self.assertIn(self.tmp.name, text)
+        self.assertIn("titled work", text)
+        self.assertIn("idle", text)
+
+    async def test_logs_without_a_file_says_so(self):
+        import bot as bot_mod
+
+        update = FakeUpdate(chat_id=42)
+        with mock.patch.object(bot_mod, "LOG_PATH",
+                               Path(self.tmp.name) / "absent.log"):
+            await self.bot.cmd_logs(update, FakeCtx())
+        self.assertIn("No log file", update.message.replies[0])
+
+    async def test_logs_tails_and_caps(self):
+        import bot as bot_mod
+
+        log = Path(self.tmp.name) / "bot.log"
+        log.write_text("\n".join("line {:03d}".format(i) for i in range(500)),
+                       encoding="utf-8")
+        update = FakeUpdate(chat_id=42)
+        with mock.patch.object(bot_mod, "LOG_PATH", log):
+            await self.bot.cmd_logs(update, FakeCtx("5000"))   # capped at 100
+        text = update.message.replies[0]
+        self.assertIn("line 499", text)
+        self.assertNotIn("line 398", text)                     # beyond the cap
+        self.assertLessEqual(len(text), 4000)
+
+    async def test_model_without_args_reports_current(self):
+        update = FakeUpdate(chat_id=42)
+        await self.bot.cmd_model(update, FakeCtx())
+        text = update.message.replies[0]
+        self.assertIn("kimi-k3", text)
+        self.assertIn("Usage:", text)
+
+    async def test_model_switch_applies_to_the_settings(self):
+        update = FakeUpdate(chat_id=42)
+        await self.bot.cmd_model(update, FakeCtx("kimi-k2.7-code"))
+        self.assertEqual(self.bot.settings.model, "kimi-k2.7-code")
+        self.assertIn("kimi-k2.7-code", update.message.replies[0])
+
+    async def test_model_switch_to_same_is_a_noop_message(self):
+        update = FakeUpdate(chat_id=42)
+        await self.bot.cmd_model(update, FakeCtx("kimi-k3"))
+        self.assertIn("Already running", update.message.replies[0])
 
 
 class FakeUserMessage:
@@ -448,3 +548,85 @@ class TestRepoPicker(unittest.IsolatedAsyncioTestCase):
         await self.bot.on_callback(update, FakeCtx())
         # The approval must still be waiting, untouched.
         self.assertIn(42, self.bot.pending)
+
+
+class FakeSearchResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class TestWebSearchTool(unittest.TestCase):
+    def test_results_are_formatted_with_title_url_extract(self):
+        from rcoder import agent as agent_mod
+
+        payload = {
+            "results": [
+                {"title": "T1", "url": "https://a", "content": "hello"},
+                {"title": "T2", "url": "https://b", "content": "world"},
+            ]
+        }
+        with mock.patch.object(
+            agent_mod.httpx, "post", lambda *a, **k: FakeSearchResponse(payload)
+        ):
+            tool = agent_mod.make_search_tool("tvly-test")
+            out = tool.invoke({"query": "anything"})
+        self.assertIn("https://a", out)
+        self.assertIn("hello", out)
+        self.assertIn("https://b", out)
+
+    def test_empty_results_say_so(self):
+        from rcoder import agent as agent_mod
+
+        with mock.patch.object(
+            agent_mod.httpx, "post",
+            lambda *a, **k: FakeSearchResponse({"results": []}),
+        ):
+            tool = agent_mod.make_search_tool("tvly-test")
+            self.assertIn("No results", tool.invoke({"query": "x"}))
+
+    def test_http_errors_are_reported_not_raised(self):
+        """A dead network must never kill a running task."""
+        from rcoder import agent as agent_mod
+
+        def boom(*a, **k):
+            raise RuntimeError("connection refused")
+
+        with mock.patch.object(agent_mod.httpx, "post", boom):
+            tool = agent_mod.make_search_tool("tvly-test")
+            out = tool.invoke({"query": "x"})
+        self.assertIn("Search failed", out)
+
+    def test_the_key_is_sent_but_not_leaked_in_output(self):
+        from rcoder import agent as agent_mod
+
+        captured = {}
+
+        def fake_post(url, json, timeout):
+            captured.update(json)
+            return FakeSearchResponse({"results": []})
+
+        with mock.patch.object(agent_mod.httpx, "post", fake_post):
+            tool = agent_mod.make_search_tool("tvly-secret")
+            out = tool.invoke({"query": "x"})
+        self.assertEqual(captured["api_key"], "tvly-secret")
+        self.assertNotIn("tvly-secret", out)
+
+    def test_max_results_is_bounded(self):
+        from rcoder import agent as agent_mod
+
+        captured = {}
+
+        def fake_post(url, json, timeout):
+            captured.update(json)
+            return FakeSearchResponse({"results": []})
+
+        with mock.patch.object(agent_mod.httpx, "post", fake_post):
+            tool = agent_mod.make_search_tool("tvly-test")
+            tool.invoke({"query": "x", "max_results": 999})
+        self.assertEqual(captured["max_results"], 10)

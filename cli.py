@@ -13,7 +13,7 @@ import logging
 import sys
 from pathlib import Path
 
-from rcoder.agent import build_agent, open_checkpointer
+from rcoder.agent import build_agent, iter_node_updates, open_checkpointer
 from rcoder.artifacts import ArtifactStore
 from rcoder.config import ConfigurationError, load_settings
 
@@ -44,8 +44,8 @@ def stream(agent, task, config):
         subgraphs=True,
     ):
         prefix = "[{}] ".format(ns[0].split(":")[0]) if ns else ""
-        for _node, payload in (update or {}).items():
-            for msg in (payload or {}).get("messages", []) or []:
+        for _node, payload in iter_node_updates(update):
+            for msg in payload.get("messages") or []:
                 for line in render(msg):
                     yield prefix + line
 

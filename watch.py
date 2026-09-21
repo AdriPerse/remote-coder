@@ -30,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-from rcoder.agent import build_agent, open_checkpointer
+from rcoder.agent import build_agent, iter_node_updates, open_checkpointer
 from rcoder.artifacts import ArtifactStore
 from rcoder.config import ConfigurationError, load_settings
 
@@ -84,8 +84,8 @@ def handle(settings, store: ArtifactStore, request, base_url: str, autonomous: b
         {"messages": [{"role": "user", "content": prompt}]},
         config=config, stream_mode="updates", subgraphs=True,
     ):
-        for _node, data in (update or {}).items():
-            for msg in (data or {}).get("messages", []) or []:
+        for _node, data in iter_node_updates(update):
+            for msg in data.get("messages") or []:
                 if msg.__class__.__name__ == "AIMessage" and isinstance(msg.content, str):
                     if msg.content.strip():
                         final = msg.content.strip()
