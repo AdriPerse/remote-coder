@@ -20,37 +20,39 @@ import sys
 from pathlib import Path
 
 GRID = [
-    "........................................",
-    "..................DDDD..................",
-    ".................DD..DD.................",
-    ".................DD..DD.DDDD............",
-    "..................DDDD.DD..DD...........",
-    ".................DD..DDDD..DD...........",
-    ".................DD..DD..DDDD...........",
-    "................DD..DDDD.DD.............",
-    "................DD..DD..DD..............",
-    "................DD..DD.DD...............",
-    ".................DDDDDDDD...............",
-    "........................................",
-    "......TT.........DDDDDDDDDD.............",
-    "....TT..TT....DDSSSSSSSSSSDD............",
-    "...T......T..DDSSSSSSSSSSSSDD...........",
-    "..T..GGGG..T.DSSSSSSSSSSSSSSD...........",
-    "..T..GGGG..TDDSSSSSSSSSSSSSSDD.........",
-    "...T.GGGG.T..DSSSSSSSSSSSSSSD..........",
-    "....T....T...DDSSSSSSSSSSSSDD..........",
-    ".....TTTT...DD.DDSSSSSSDD.DD...........",
-    "..TT.......DD...DDDDDDDD...DD..........",
-    ".TT..TTT..DD.....DDDDDD.....DD.........",
-    "TT....TTT.DD.....DDDDDD......DD........",
-    "TT...TTT.........DDDDDD...............",
-    ".T..TT...........DDDDDD................",
-    "..TT..............DDDD.................",
-    "........................................",
+    "................................................",
+    "................................................",
+    "................................................",
+    "....................SSSSTTTTT...................",
+    "...................SS.....TTTT..................",
+    ".........................TTTT...................",
+    "...................BBBBBBTTT....................",
+    "..................BBBBBBBT......................",
+    ".................BBBBBBBBB......................",
+    ".........LL...L.BB..>.BBBBB.L...LL..............",
+    "..........LL..BBB..>.>__BBB.LL..................",
+    "...........LL..LBBBBBBBBBBBBL..LL...............",
+    "............LL..BBBBBBBBBBBB..LL................",
+    ".............LL..BB......BB..LL.................",
+    "..............LLLB..EE..EE..BLLL................",
+    "...............CCCC.B..EE..EE..B.CCCC...........",
+    "..............CCC..............CCC..............",
+    "..............CCC..............CCC..............",
+    "..............CCC..............CCC..............",
+    "..............CCC..C........C..CCC..............",
+    "...............CCC............CCC...............",
+    "................................................",
+    "................................................",
+    "................................................",
+    "................................................",
+    "................................................",
+    "................................................",
+    "................................................",
 ]
 
-# ANSI 256-palette: T claws, D dark body, S belly plate, G eyes.
-COLORS = {"T": 66, "D": 60, "S": 103, "G": 120}
+# ANSI 256-palette: S stinger, T tail, B body, L legs, E eyes, C claws.
+COLORS = {"S": 120, "T": 60, "B": 103, "L": 66, "E": 120, "C": 66,
+          ">": 60, "_": 60}
 UPPER = "▀"   # fg = top pixel, bg = bottom pixel
 FULL = "█"
 
@@ -85,13 +87,22 @@ def render_ansi(grid):
 
 
 def render_mono(grid):
-    """Same pixels, no color: dense chars for filled, space for empty."""
+    """Character art: keep the glyphs, blank the dots."""
+    return "\n".join(
+        "".join(" " if c == "." else c for c in row).rstrip() for row in grid
+    )
+
+
+def render_char_ansi(grid):
+    """Per-character color by region letter, preserving the hand-drawn art."""
     lines = []
-    for pair_row in pairs(grid):
+    for row in grid:
         out = []
-        for top, bottom in pair_row:
-            t, b = top != ".", bottom != "."
-            out.append(FULL if t and b else UPPER if t else "▄" if b else " ")
+        for c in row:
+            if c == ".":
+                out.append("\x1b[0m ")
+            else:
+                out.append("\x1b[38;5;{}m{}\x1b[0m".format(COLORS.get(c, 103), c))
         lines.append("".join(out).rstrip())
     return "\n".join(lines)
 
@@ -101,12 +112,12 @@ def main():
     # Emit as JSON so a cp1252 console cannot mangle it: the caller reads
     # and writes the file, the console never touches the glyphs.
     import json
-    print(json.dumps({"mono": mono, "ansi": render_ansi(GRID)}))
+    print(json.dumps({"mono": mono, "ansi": render_char_ansi(GRID)}))
     if "--write" not in sys.argv:
         return
     path = Path(__file__).resolve().parent.parent / "cli.py"
     text = path.read_text(encoding="utf-8")
-    ansi = render_ansi(GRID)
+    ansi = render_char_ansi(GRID)
     banner = 'BANNER = """\n' + ansi + '\n\n      R E M O T E   C O D E R\n"""'
     new = re.sub(r'BANNER = """.*?"""', banner, text, count=1, flags=re.S)
     if new == text:
