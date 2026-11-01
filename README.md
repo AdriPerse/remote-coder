@@ -38,7 +38,7 @@ written and unit-tested but has never talked to a real bot -- it needs a
 token from @BotFather, which is the one thing that cannot be done from
 this machine.
 
-    python -m unittest discover -s tests     # 23 tests, no key or token needed
+    python -m unittest discover -s tests     # 81 tests, no key or token needed
 
 ## Commands (from the phone)
 
@@ -59,7 +59,7 @@ When the answer is better seen than described, the agent calls
 a change into the box at the bottom, and the page reloads itself when the
 agent rewrites the file.
 
-    python artifact_server.py --root ./artifacts --port 8001 --host 0.0.0.0
+    python artifact_server.py --root ./artifacts --port 8001   # loopback only
     python watch.py --artifacts ./artifacts      # runs the follow-ups
     python cli.py <repo> "<task>" --artifacts ./artifacts
 
@@ -72,6 +72,25 @@ and the server pushes a reload.
 A claimed request is never retried. `take()` marks it before the agent runs,
 so a request that crashes the agent is dropped rather than replayed -- a
 silent retry loop burning tokens unattended is the worse failure.
+
+The prompt box is a shell with extra steps -- `watch.py` runs approvals OFF
+-- so the queue is guarded like one:
+
+- **Loopback by default.** It used to bind `0.0.0.0`, which put an
+  unauthenticated agent trigger on the LAN. For the phone, bind your
+  Tailscale address and name it, so only your own devices reach it:
+
+      python artifact_server.py --root ./artifacts --host <tailscale-ip> --public-name <machine>.<tailnet>.ts.net
+      python cli.py <repo> "<task>" --artifacts ./artifacts --artifact-url http://<machine>.<tailnet>.ts.net:8001
+
+- **Only its own page may enqueue.** A form POST is not stopped by the
+  same-origin policy: any site you visit could auto-submit one to
+  `127.0.0.1:8001`. `Sec-Fetch-Site` (or `Origin`) must say same-origin, or
+  it is a 403 -- checked before the slug lookup, so a probe learns nothing.
+- **Only known Host names are answered** (400 otherwise). That defeats DNS
+  rebinding, where a hostile name re-pointed at this machine would make the
+  attacker's page "same-origin". A wildcard bind answers to loopback and
+  `--public-name` only, so it fails closed.
 
 Run it on its own port, which makes it its own **origin**. Three layers of
 isolation, and each one is load-bearing:

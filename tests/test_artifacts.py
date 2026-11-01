@@ -17,7 +17,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from artifact_server import ARTIFACT_CSP, IFRAME_SANDBOX, build_app, inject_csp  # noqa: E402
+from artifact_server import (  # noqa: E402
+    ARTIFACT_CSP,
+    IFRAME_SANDBOX,
+    allowed_hosts,
+    build_app,
+    inject_csp,
+)
 from rcoder.artifacts import ArtifactStore, BadSlug, check_slug  # noqa: E402
 
 
@@ -113,7 +119,7 @@ class TestServer(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = ArtifactStore(Path(self.tmp.name))
-        self.client = TestClient(build_app(self.store))
+        self.client = TestClient(build_app(self.store), base_url="http://127.0.0.1:8001")
 
     def tearDown(self):
         self.store.close()
@@ -178,6 +184,60 @@ class TestServer(unittest.TestCase):
         self.store.write("demo", "<p>x</p>")
         self.client.post("/a/demo/ask", data={"prompt": "   "}, follow_redirects=False)
         self.assertEqual(self.store.pending(), [])
+
+
+class TestQueueGuard(unittest.TestCase):
+    """The prompt box feeds an agent with a shell, so it is guarded like one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ArtifactStore(Path(self.tmp.name))
+        self.store.write("demo", "<p>x</p>")
+        self.client = TestClient(build_app(self.store), base_url="http://127.0.0.1:8001")
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _ask(self, client, headers):
+        return client.post("/a/demo/ask", data={"prompt": "run this"},
+                           headers=headers, follow_redirects=False)
+
+    def test_a_cross_site_form_is_refused(self):
+        """Any page the owner visits could auto-submit this form."""
+        for headers in ({"Sec-Fetch-Site": "cross-site"},
+                        {"Sec-Fetch-Site": "same-site"},
+                        {"Origin": "https://evil.example"},
+                        {"Origin": "null"}):
+            with self.subTest(headers=headers):
+                self.assertEqual(self._ask(self.client, headers).status_code, 403)
+        self.assertEqual(self.store.pending(), [])
+
+    def test_our_own_page_may_ask(self):
+        headers = {"Sec-Fetch-Site": "same-origin", "Origin": "http://127.0.0.1:8001"}
+        self.assertEqual(self._ask(self.client, headers).status_code, 303)
+        self.assertEqual(len(self.store.pending()), 1)
+
+    def test_a_rebound_host_name_is_refused(self):
+        """DNS rebinding makes a hostile page same-origin; its Host gives it away."""
+        rebound = TestClient(build_app(self.store), base_url="http://evil.example:8001")
+        self.assertEqual(rebound.get("/").status_code, 400)
+        response = self._ask(rebound, {"Sec-Fetch-Site": "same-origin"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.store.pending(), [])
+
+    def test_a_wildcard_bind_answers_only_to_given_names(self):
+        lan = TestClient(build_app(self.store, allowed_hosts("0.0.0.0")),
+                         base_url="http://192.168.178.52:8001")
+        self.assertEqual(lan.get("/").status_code, 400)
+        named = TestClient(
+            build_app(self.store, allowed_hosts("0.0.0.0", ["tower.example.ts.net"])),
+            base_url="http://tower.example.ts.net:8001",
+        )
+        self.assertEqual(named.get("/").status_code, 200)
+        bound = TestClient(build_app(self.store, allowed_hosts("100.64.0.7")),
+                           base_url="http://100.64.0.7:8001")
+        self.assertEqual(bound.get("/").status_code, 200)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,17 @@ The isolation has three layers, weakest last:
    origin, which would quietly undo layer 1.
 
 Live reload is `watchfiles` -> SSE -> `location.reload()` in the frame. The
-prompt box POSTs into a queue; nothing here runs the agent.
+prompt box POSTs into a queue; nothing here runs the agent -- but watch.py
+does, with approvals OFF, so the queue is guarded as if it were a shell:
+
+4. Only this server's own page may enqueue. The prompt box is a plain form
+   POST, which the same-origin policy does not stop: any site the owner
+   visits could auto-submit a form to 127.0.0.1:8001.
+5. Only known Host names are answered, which defeats DNS rebinding (a
+   hostile name re-pointed at this machine would otherwise turn "cross-site"
+   into "same-origin" and could read the artifact list).
+6. Loopback by default. Reaching it from a phone means binding a Tailscale
+   address, never the LAN or a port-forward.
 """
 
 from __future__ import annotations
@@ -29,12 +39,15 @@ import argparse
 import asyncio
 import html as html_mod
 import logging
+from collections.abc import Sequence
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sse_starlette.sse import EventSourceResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from watchfiles import awatch
 
 from rcoder.artifacts import ArtifactStore, BadSlug
@@ -51,6 +64,9 @@ ARTIFACT_CSP = (
 )
 
 IFRAME_SANDBOX = "allow-scripts allow-downloads"
+
+LOOPBACK_NAMES = ("127.0.0.1", "localhost")
+WILDCARD_BINDS = ("0.0.0.0", "::", "")
 
 SHELL = """<!doctype html>
 <html lang="en"><head>
@@ -142,8 +158,43 @@ def inject_csp(document: str) -> str:
     return document[: close + 1] + meta + document[close + 1 :]
 
 
-def build_app(store: ArtifactStore) -> FastAPI:
+def allowed_hosts(bind_host: str, public_names: Sequence[str] = ()) -> list[str]:
+    """The Host header values this server answers to.
+
+    A wildcard bind cannot know the names it is reached by, so it answers to
+    loopback and to explicitly given names only: a LAN request by IP gets a
+    400 instead of the artifact list. Failing closed is the point.
+    """
+    hosts = list(LOOPBACK_NAMES)
+    if bind_host not in WILDCARD_BINDS:
+        hosts.append(bind_host)
+    hosts.extend(public_names)
+    return list(dict.fromkeys(hosts))
+
+
+def refuse_cross_site(request: Request) -> None:
+    """Only this server's own page may put work in the agent's queue.
+
+    Browsers label every request with where it came from: Sec-Fetch-Site on
+    all current ones, Origin on every POST. Anything but our own origin is
+    refused. A request carrying neither is not from a browser, and a local
+    program needs no forged form to do harm, so it passes.
+    """
+    site = request.headers.get("sec-fetch-site")
+    if site is not None:
+        if site != "same-origin":
+            raise HTTPException(status_code=403, detail="Cross-site request refused")
+        return
+    origin = request.headers.get("origin")
+    if origin is not None and urlsplit(origin).netloc != request.headers.get("host"):
+        raise HTTPException(status_code=403, detail="Cross-site request refused")
+
+
+def build_app(
+    store: ArtifactStore, hosts: Sequence[str] = LOOPBACK_NAMES
+) -> FastAPI:
     app = FastAPI(title="remote-coder artifacts", docs_url=None, redoc_url=None)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(hosts))
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -192,7 +243,10 @@ def build_app(store: ArtifactStore) -> FastAPI:
         return EventSourceResponse(events())
 
     @app.post("/a/{slug}/ask")
-    async def ask(slug: str, prompt: str = Form(...)) -> RedirectResponse:
+    async def ask(slug: str, request: Request, prompt: str = Form(...)) -> RedirectResponse:
+        # Before the lookup, so a cross-site probe cannot even learn which
+        # slugs exist from a 404.
+        refuse_cross_site(request)
         _lookup(store, slug)
         text = prompt.strip()
         if text:
@@ -218,14 +272,21 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="artifacts", help="artifact directory")
     ap.add_argument("--host", default="127.0.0.1",
-                    help="0.0.0.0 to reach it from the tailnet/LAN")
+                    help="address to bind; a Tailscale IP to reach it from "
+                         "your phone. Never 0.0.0.0 on an untrusted network")
+    ap.add_argument("--public-name", action="append", default=[],
+                    help="extra Host name to answer to, e.g. the machine's "
+                         "Tailscale MagicDNS name; repeatable")
     ap.add_argument("--port", type=int, default=8001)
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     store = ArtifactStore(Path(args.root).resolve())
-    logger.info("Artifacts at %s -> http://%s:%d", store.root, args.host, args.port)
-    uvicorn.run(build_app(store), host=args.host, port=args.port, log_level="warning")
+    hosts = allowed_hosts(args.host, args.public_name)
+    logger.info("Artifacts at %s -> http://%s:%d (answers to: %s)",
+                store.root, args.host, args.port, ", ".join(hosts))
+    uvicorn.run(build_app(store, hosts), host=args.host, port=args.port,
+                log_level="warning")
     return 0
 
 

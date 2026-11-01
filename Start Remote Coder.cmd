@@ -32,8 +32,11 @@ cd /d "%ROOT%"
 if not exist "%ROOT%logs" mkdir "%ROOT%logs"
 
 REM The artifact preview server. Its own port = its own origin, which is
-REM what keeps a generated page away from everything else.
-start "remote-coder artifacts" /min cmd /c ""%PY%" artifact_server.py --root "%ROOT%artifacts" --port 8001 --host 0.0.0.0 >> "%ROOT%logs\artifacts.log" 2>&1"
+REM what keeps a generated page away from everything else. LOOPBACK ONLY:
+REM its prompt box feeds watch.py, which runs the agent with approvals off,
+REM so it must never answer the LAN. To use it from the phone, bind the
+REM Tailscale address instead (README, "Artifacts").
+start "remote-coder artifacts" /min cmd /c ""%PY%" artifact_server.py --root "%ROOT%artifacts" --port 8001 --host 127.0.0.1 >> "%ROOT%logs\artifacts.log" 2>&1"
 
 REM Runs follow-up requests typed on an artifact page.
 start "remote-coder watch" /min cmd /c ""%PY%" watch.py --artifacts "%ROOT%artifacts" >> "%ROOT%logs\watch.log" 2>&1"
